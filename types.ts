@@ -7,6 +7,8 @@ export interface Chapter {
   markdown?: string; // Converted markdown
   translatedMarkdown?: string; // After Gemini
   proofreadMarkdown?: string; // After 2nd pass
+  isSkippable?: boolean; // Pages to remove completely (Copyright, TOC, Title Page)
+  isReference?: boolean; // Pages to keep but NOT translate (References, Notes)
 }
 
 export interface ProcessingLog {
@@ -31,4 +33,5 @@ export interface AppConfig {
   proofreadInstruction: string;
   enableProofreading: boolean;
   useRecommendedPrompts: boolean;
+  smartSkip: boolean; // Toggle for skipping non-content pages
 }

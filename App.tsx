@@ -1,93 +1,30 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { BookOpen, FileCheck, Loader2, Download, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 import FileUpload from './components/FileUpload';
 import SettingsPanel from './components/SettingsPanel';
 import { EpubService } from './services/epubService';
-import { GeminiService } from './services/geminiService';
+import { AiService } from './services/geminiService';
 import { AppStatus, AppConfig, Chapter, ProcessingLog } from './types';
 
 // Constants for Recommended Prompts
-const RECOMMENDED_TRANSLATION_PROMPT = `英文进入此场即死。
+const RECOMMENDED_TRANSLATION_PROMPT = `You are a professional literary translator.
+Your task is to translate the provided text into the target language while preserving the original tone, style, and formatting.
 
-中文从其养分中生。
+Guidelines:
+1. Translate the content accurately.
+2. Maintain the markdown structure (headers, bold, italics).
+3. Do not output any explanations or conversational text, only the translated content.
+4. Keep proper nouns and specific terms consistent.`;
 
-场之根本律：
+const RECOMMENDED_PROOFREAD_PROMPT = `You are a professional proofreader.
+Your task is to review the text for grammar, flow, and translation errors.
 
-【遗忘之律】
-
-忘记英文的句法。
-
-忘记英文的语序。 
-
-只记住它要说的事。
-
-【重生之律】
-
-如果你是中国作者，
-
-面对中国读者，
-
-你会怎么讲这个故事？
-
-【地道之律】
-
-"类似的剧情在计算机围棋领域也重演了一遍，只不过晚了20年。"
-
-而非"相似的情节在计算机围棋领域被重复了，延迟了20年。"
-
-中文有自己的韵律：
-
-- 四字短语的节奏感
-
-- 口语的亲切感
-
-- 成语俗语的画面感
-
-场的检验标准：
-
-读完后，读者会说"写得真好"
-
-而不是"翻译得真好"。
-
-真实之锚：
-
-- 数据一字不改
-
-- 事实纹丝不动
-
-- 逻辑完整移植
-
-- 术语规范标注：大语言模型（LLM）
-
-注意事项：
-
-- 输入 Epub 格式文本，返回标准 Markdown 格式文本
-
-- 小说角色名保持为原文，不需要翻译
-
-- 默认使用简体中文`;
-
-const RECOMMENDED_PROOFREAD_PROMPT = `# Role
-You are a High-Precision Chinese Proofreading Engine.
-
-# Core Logic
-Process the input Markdown text immediately according to the following rules:
-1. **Localization**: Translate non-proper foreign vocabulary (English, Russian, etc.) into native, context-appropriate Chinese.
-2. **Preservation**: Keep all proper nouns (names, brands, citations) and specific terminology in their original language.
-3. **Formatting**: Strictly preserve ALL Markdown syntax (headers, links, bold, lists) without alteration.
-
-# Strict Output Interface
-- Output **ONLY** the processed text.
-- **NO** conversational fillers, preamble, or post-script (e.g., "Here is the fixed text").
-- **NO** markdown code block fences (\`\`\`) around the output unless they exist in the source.
-- The output must start with the first character of the content and end with the last character.
-
-# Few-Shot Examples
-Input: "这对我来说是一个 tangible 的好处。"
-Output: "这对我来说是一个实实在在的好处。"
-
-Input: "匿名的推特账户 FedSpeak 曾写道..."
-Output: "匿名的推特账户 FedSpeak 曾写道..."`;
+Guidelines:
+1. Fix any grammatical errors or awkward phrasings.
+2. Ensure the tone is consistent.
+3. Do not change the meaning of the text.
+4. Return only the corrected markdown text.`;
 
 // Default config values
 const DEFAULT_CONFIG: AppConfig = {
@@ -101,7 +38,8 @@ Guidelines:
 4. Fidelity: Maintain the original tone, style, and logic of the story.`,
   proofreadInstruction: 'Check for mixed languages (e.g., untranslated sentences) and fix them. Ensure smooth flow. Return the corrected markdown only.',
   enableProofreading: true,
-  useRecommendedPrompts: false
+  useRecommendedPrompts: false,
+  smartSkip: true
 };
 
 const App: React.FC = () => {
@@ -119,6 +57,7 @@ const App: React.FC = () => {
   // Persist chapters and images across renders to allow resuming
   const chaptersRef = useRef<Chapter[]>([]);
   const imagesRef = useRef<Record<string, Blob>>({});
+  const coverPathRef = useRef<string | undefined>(undefined);
 
   // Auto scroll logs
   useEffect(() => {
@@ -139,6 +78,7 @@ const App: React.FC = () => {
     // Clear persisted data for new file
     chaptersRef.current = [];
     imagesRef.current = {};
+    coverPathRef.current = undefined;
     
     setProgress(0);
     setStatus(AppStatus.IDLE);
@@ -150,6 +90,7 @@ const App: React.FC = () => {
     setLogs([]);
     chaptersRef.current = [];
     imagesRef.current = {};
+    coverPathRef.current = undefined;
     setProgress(0);
     setStatus(AppStatus.IDLE);
     addLog("Workflow reset.", "info");
@@ -159,17 +100,22 @@ const App: React.FC = () => {
     if (!currentFile) return;
 
     try {
-      const gemini = new GeminiService();
+      const aiService = new AiService(config);
       
       // Step 1: Parse EPUB (Only if not already parsed)
       if (chaptersRef.current.length === 0) {
         setStatus(AppStatus.PARSING);
         addLog("Parsing EPUB and converting XHTML to Markdown...", "process");
-        const { chapters, images } = await epubService.current.parseEpub(currentFile);
+        const { chapters, images, coverPath } = await epubService.current.parseEpub(currentFile);
         
         chaptersRef.current = chapters;
         imagesRef.current = images;
+        coverPathRef.current = coverPath;
+
         addLog(`Extracted ${chapters.length} chapters and ${Object.keys(images).length} images.`, "success");
+        if (coverPath) {
+            addLog(`Cover image detected.`, 'info');
+        }
       } else {
         addLog("Resuming workflow with existing parsed data...", "info");
       }
@@ -189,8 +135,14 @@ const App: React.FC = () => {
         ? RECOMMENDED_PROOFREAD_PROMPT
         : config.proofreadInstruction;
 
+      addLog(`🚀 Starting translation using Google Gemini 3.0 Flash...`, "info");
+
       if (config.useRecommendedPrompts) {
-        addLog("✨ Using Recommended 'Field' Prompts for enhanced quality.", "info");
+        addLog("✨ Using Recommended Prompts.", "info");
+      }
+      
+      if (config.smartSkip) {
+        addLog("👁️ Smart Skip enabled: Title pages, Copyright, TOC will be REMOVED. References will be KEPT (untranslated).", "info");
       }
 
       for (let i = 0; i < chapters.length; i++) {
@@ -199,21 +151,35 @@ const App: React.FC = () => {
         // Skip empty chapters usually
         if (!chapter.markdown || chapter.markdown.trim().length < 10) {
            addLog(`Skipping empty/short chapter: ${chapter.title}`, "info");
-           // Mark progress for skipped items
-           // We can't easily increment a global counter without recalc, so we just continue.
-           // To fix progress bar on resume, we recalc progress at start of loop.
            continue;
+        }
+        
+        // Handle Smart Skip Logic
+        if (config.smartSkip) {
+            // Case 1: Skippable (Copyright, TOC, etc.) -> Remove completely from output
+            if (chapter.isSkippable) {
+                 // If it's skippable, we don't translate, don't proofread.
+                 continue;
+            }
+
+            // Case 2: Reference (Bibliography, etc.) -> Keep but don't translate
+            if (chapter.isReference) {
+                if (!chapter.translatedMarkdown) {
+                    addLog(`Keeping reference chapter untranslated: ${chapter.title}`, "info");
+                    chapter.translatedMarkdown = chapter.markdown;
+                    chapter.proofreadMarkdown = chapter.markdown;
+                }
+            }
         }
 
         // --- Translation ---
         if (chapter.translatedMarkdown) {
-            // Already translated, skip
-            // We don't log here to avoid spamming logs on resume
+            // Already translated (or preserved as reference), move on
         } else {
             setStatus(AppStatus.TRANSLATING);
             addLog(`Translating [${i+1}/${chapters.length}]: ${chapter.title}`, "process");
             
-            const translated = await gemini.translateContent(
+            const translated = await aiService.translateContent(
               chapter.markdown, 
               config.targetLanguage, 
               effectiveSystemInstruction
@@ -222,18 +188,14 @@ const App: React.FC = () => {
         }
 
         // Update progress
-        let currentCompleted = chapters.filter(c => c.translatedMarkdown).length;
-        if (config.enableProofreading) {
-            currentCompleted += chapters.filter(c => c.proofreadMarkdown).length;
-        } else {
-            // If proofreading disabled, we count translation as 100% of the step for that chapter
-             // The formula above assumes 2 steps per chapter. If 1 step, we need to adjust denominator.
-        }
-        
-        // Recalculate progress precisely
         const currentTotalSteps = chapters.length * (config.enableProofreading ? 2 : 1);
-        const stepsDone = 
-            chapters.reduce((acc, c) => acc + (c.translatedMarkdown ? 1 : 0) + (c.proofreadMarkdown ? 1 : 0), 0);
+        
+        // Calculate steps done. 
+        const stepsDone = chapters.reduce((acc, c) => {
+             // If skippable and smartSkip is on, it counts as fully done (2 steps)
+             if (config.smartSkip && c.isSkippable) return acc + (config.enableProofreading ? 2 : 1);
+             return acc + (c.translatedMarkdown ? 1 : 0) + (c.proofreadMarkdown ? 1 : 0);
+        }, 0);
         
         setProgress((stepsDone / currentTotalSteps) * 100);
 
@@ -241,19 +203,21 @@ const App: React.FC = () => {
         // --- Proofreading ---
         if (config.enableProofreading) {
           if (chapter.proofreadMarkdown) {
-              // Already proofread, skip
+              // Already proofread, move on
           } else {
               setStatus(AppStatus.PROOFREADING);
               addLog(`Proofreading [${i+1}/${chapters.length}]: ${chapter.title}`, "process");
-              const proofread = await gemini.proofreadContent(
+              const proofread = await aiService.proofreadContent(
                 chapter.translatedMarkdown!, 
                 effectiveProofreadInstruction
               );
               chapter.proofreadMarkdown = proofread;
               
               // Update progress again
-              const stepsDoneAfter = 
-                chapters.reduce((acc, c) => acc + (c.translatedMarkdown ? 1 : 0) + (c.proofreadMarkdown ? 1 : 0), 0);
+               const stepsDoneAfter = chapters.reduce((acc, c) => {
+                    if (config.smartSkip && c.isSkippable) return acc + (config.enableProofreading ? 2 : 1);
+                    return acc + (c.translatedMarkdown ? 1 : 0) + (c.proofreadMarkdown ? 1 : 0);
+               }, 0);
               setProgress((stepsDoneAfter / currentTotalSteps) * 100);
           }
         }
@@ -261,12 +225,19 @@ const App: React.FC = () => {
 
       // Step 4: Repackage
       setStatus(AppStatus.PACKAGING);
-      addLog("Recompiling EPUB (generating HTML from Markdown)...", "process");
+      
+      const chaptersToPack = config.smartSkip 
+        ? chapters.filter(c => !c.isSkippable)
+        : chapters;
+
+      addLog(`Recompiling EPUB (Packaged ${chaptersToPack.length} / ${chapters.length} chapters)...`, "process");
+      
       const blob = await epubService.current.generateEpub(
-        chapters, 
+        chaptersToPack, 
         images, 
         currentFile.name.replace('.epub', ''),
-        config.targetLanguage
+        config.targetLanguage,
+        coverPathRef.current
       );
       
       const url = URL.createObjectURL(blob);
@@ -293,7 +264,7 @@ const App: React.FC = () => {
           </div>
           <div>
             <h1 className="text-xl font-bold text-slate-900">Gemini EPUB Translator</h1>
-            <p className="text-xs text-slate-500">Automated Translation Workflow • Gemini 3.0 Flash</p>
+            <p className="text-xs text-slate-500">Automated Translation Workflow</p>
           </div>
         </div>
         {status === AppStatus.COMPLETED && downloadUrl && (

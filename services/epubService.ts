@@ -1,3 +1,4 @@
+
 import JSZip from 'jszip';
 import TurndownService from 'turndown';
 import { marked } from 'marked';
@@ -9,6 +10,36 @@ const turndownService = new TurndownService({
   headingStyle: 'atx',
   codeBlockStyle: 'fenced'
 });
+
+// Custom Rule: Flatten Headings
+// Fixes issue where <h1>2<br/>Title</h1> becomes invalid broken markdown.
+// Converts newlines inside headers to spaces to ensure valid "# Title" format.
+turndownService.addRule('flattenHeader', {
+  filter: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
+  replacement: function (content, node, options) {
+    const hLevel = Number(node.nodeName.charAt(1));
+    const hashes = '#'.repeat(hLevel);
+    
+    // Replace newlines (often from <br> tags) with spaces, remove excessive whitespace
+    const cleanContent = content.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+    
+    return `\n\n${hashes} ${cleanContent}\n\n`;
+  }
+});
+
+// Helper to escape XML characters for OPF and NCX files
+const escapeXml = (unsafe: string): string => {
+  return unsafe.replace(/[<>&'"]/g, (c) => {
+    switch (c) {
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '&': return '&amp;';
+      case '\'': return '&apos;';
+      case '"': return '&quot;';
+      default: return c;
+    }
+  });
+};
 
 // Elegant Chinese Typography CSS
 const CHINESE_EPUB_CSS = `
@@ -46,14 +77,14 @@ const CHINESE_EPUB_CSS = `
     margin-top: 0;
   }
 
-  /* 引用：楷体，灰色，左侧边框 */
+  /* 引用：取消特殊格式，改为普通文本样式 */
   blockquote {
-    font-family: "KaiTi", "KaiTi_GB2312", "STKaiti", serif;
-    margin: 1em 1em;
-    padding: 0.6em 1em;
-    border-left: 4px solid #ddd;
-    color: #555;
-    background-color: #f9f9f9;
+    font-family: inherit;
+    margin: 1em 0;
+    padding: 0 2em;
+    border: none;
+    background: none;
+    color: inherit;
   }
   
   /* 列表：取消缩进，保持整洁 */
@@ -131,10 +162,10 @@ const DEFAULT_EPUB_CSS = `
   }
 
   blockquote {
-    border-left: 3px solid #ccc;
+    border: none;
     margin: 1em 2em;
-    padding-left: 1em;
-    color: #555;
+    padding: 0;
+    color: inherit;
     font-style: italic;
   }
 
@@ -155,8 +186,9 @@ const DEFAULT_EPUB_CSS = `
 export class EpubService {
   /**
    * Parses an EPUB file (zip), identifies the spine, and extracts chapters as Markdown.
+   * Also attempts to identify the cover image.
    */
-  async parseEpub(file: File): Promise<{ chapters: Chapter[], images: Record<string, Blob> }> {
+  async parseEpub(file: File): Promise<{ chapters: Chapter[], images: Record<string, Blob>, coverPath?: string }> {
     const zip = new JSZip();
     const loadedZip = await zip.loadAsync(file);
 
@@ -192,6 +224,24 @@ export class EpubService {
     // Get Spine order
     const spineRefs = Array.from(opfDoc.querySelectorAll("spine > itemref"));
     
+    // Attempt to find Cover Image ID
+    // Priority 1: <meta name="cover" content="item-id" />
+    let coverId = opfDoc.querySelector('meta[name="cover"]')?.getAttribute('content');
+
+    // Priority 2: <item properties="cover-image" ... />
+    if (!coverId) {
+        const coverItem = opfDoc.querySelector('manifest > item[properties~="cover-image"]');
+        if (coverItem) {
+            coverId = coverItem.getAttribute('id');
+        }
+    }
+
+    let coverPath: string | undefined = undefined;
+    if (coverId && manifestItems[coverId]) {
+        // Construct full zip path for the cover
+        coverPath = opfDir + manifestItems[coverId];
+    }
+
     const chapters: Chapter[] = [];
     const images: Record<string, Blob> = {};
 
@@ -225,23 +275,52 @@ export class EpubService {
         
         // Use DOMParser to get a title if possible
         const doc = parser.parseFromString(htmlContent, "text/html");
-        const title = doc.querySelector("title")?.textContent || `Chapter ${chapters.length + 1}`;
+        
+        // BETTER TITLE EXTRACTION:
+        // 1. Try first h1, h2, h3
+        // 2. Fallback to <title>
+        // 3. Fallback to filename
+        let title = "";
+        const headings = doc.querySelectorAll('h1, h2, h3');
+        if (headings.length > 0) {
+            title = headings[0].textContent?.trim() || "";
+        }
+        if (!title) {
+            title = doc.querySelector("title")?.textContent?.trim() || "";
+        }
+        if (!title) {
+            title = `Chapter ${chapters.length + 1}`;
+        }
         
         // Convert body to markdown
         const bodyContent = doc.body.innerHTML;
         const markdown = turndownService.turndown(bodyContent);
+
+        // Classification Logic
+        const lowerTitle = title.trim().toLowerCase();
+        const lowerHref = href.toLowerCase();
+
+        // 1. Skippable Pages (Remove Completely): Copyright, Title Page, TOC, Dedication, Cover
+        const isSkippable = /^(copyright|colophon|imprint|legal|cover|title\s?page|table\s?of\s?contents|^toc$|dedication)/i.test(lowerTitle)
+          || /(copyright|cover|title[\-_]?page|toc|contents)\.(xhtml|html|xml)$/i.test(lowerHref);
+
+        // 2. Reference Pages (Keep but Don't Translate): References, Bibliography, Notes, Acknowledgments
+        const isReference = /^(references|bibliography|works\s?cited|sources|acknowledg?ments|credits|notes|endnotes)/i.test(lowerTitle)
+          || /(references|bibliography|notes)\.(xhtml|html|xml)$/i.test(lowerHref);
 
         chapters.push({
           id,
           fileName: href,
           title,
           content: htmlContent, // Original HTML
-          markdown: markdown
+          markdown: markdown,
+          isSkippable,
+          isReference
         });
       }
     }
 
-    return { chapters, images };
+    return { chapters, images, coverPath };
   }
 
   /**
@@ -252,7 +331,8 @@ export class EpubService {
     chapters: Chapter[], 
     originalImages: Record<string, Blob>, 
     title: string,
-    targetLanguage: string = "English" // Added parameter to determine CSS
+    targetLanguage: string = "English",
+    originalCoverPath?: string
   ): Promise<Blob> {
     const zip = new JSZip();
 
@@ -271,26 +351,59 @@ export class EpubService {
    </rootfiles>
 </container>`);
 
-    // 3. Add Images (Flattened to 'images/' folder)
+    // 3. Add CSS File
+    // We add the stylesheet as a separate file to avoid redundancy in every HTML file
+    zip.file("css/styles.css", cssToUse);
+
+    // 4. Add Images (Flattened to 'images/' folder)
     // We extract the filename from the original path and save it to a unified 'images/' folder.
-    // This simplifies path resolution in the generated HTML.
     const processedImageNames = new Set<string>();
-    
+    let generatedCoverId: string | null = null;
+    let manifestImages = '';
+
     for (const [path, blob] of Object.entries(originalImages)) {
       const fileName = path.split('/').pop(); // Get just 'cover.jpg' from 'OEBPS/images/cover.jpg'
       if (fileName && !processedImageNames.has(fileName)) {
         zip.file(`images/${fileName}`, blob);
         processedImageNames.add(fileName);
+
+        // Generate manifest entry for this image
+        const imgId = `img_${fileName.replace(/\W/g, '_')}`;
+        
+        // Check if this is the cover
+        let properties = "";
+        if (originalCoverPath && path === originalCoverPath) {
+            properties = ' properties="cover-image"';
+            generatedCoverId = imgId;
+        }
+
+        // Determine simple mimetype
+        let mime = "image/jpeg";
+        if (fileName.endsWith('.png')) mime = "image/png";
+        if (fileName.endsWith('.gif')) mime = "image/gif";
+        if (fileName.endsWith('.svg')) mime = "image/svg+xml";
+        if (fileName.endsWith('.webp')) mime = "image/webp";
+
+        manifestImages += `<item id="${imgId}" href="images/${fileName}" media-type="${mime}"${properties}/>\n`;
       }
     }
 
-    // 4. Generate HTML files from Translated Markdown
+    // 5. Generate HTML files from Translated Markdown
     let manifestItems = '';
+    // Add CSS to manifest
+    manifestItems += '<item id="css" href="css/styles.css" media-type="text/css"/>\n';
+    
+    // Add Images to manifest
+    manifestItems += manifestImages;
+
     let spineItems = '';
     let navPoints = '';
+    let navList = '';
 
     for (let i = 0; i < chapters.length; i++) {
       const ch = chapters[i];
+      // Use proofread, then translated, then original markdown.
+      // If Smart Skip was active, translatedMarkdown matches markdown (original).
       const contentToUse = ch.proofreadMarkdown || ch.translatedMarkdown || ch.markdown || "";
       
       // Convert Markdown back to HTML
@@ -309,13 +422,15 @@ export class EpubService {
         return match;
       });
 
+      // ESCAPE TITLE for XML
+      const safeTitle = escapeXml(ch.title);
+
+      // Use external link for CSS instead of inline style
       const fullHtml = `<?xml version='1.0' encoding='utf-8'?>
-<html xmlns="http://www.w3.org/1999/xhtml" lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="${isChinese ? 'zh' : 'en'}">
 <head>
-  <title>${ch.title}</title>
-  <style>
-${cssToUse}
-  </style>
+  <title>${safeTitle}</title>
+  <link rel="stylesheet" href="css/styles.css" type="text/css"/>
 </head>
 <body>
 ${htmlBody}
@@ -330,19 +445,55 @@ ${htmlBody}
       manifestItems += `<item id="${id}" href="${fileName}" media-type="application/xhtml+xml"/>\n`;
       spineItems += `<itemref idref="${id}"/>\n`;
       
+      // Build TOC NCX NavPoint
       navPoints += `<navPoint id="nav${i+1}" playOrder="${i+1}">
-        <navLabel><text>${ch.title}</text></navLabel>
+        <navLabel><text>${safeTitle}</text></navLabel>
         <content src="${fileName}"/>
       </navPoint>\n`;
+
+      // Build HTML TOC List Item
+      navList += `<li><a href="${fileName}">${safeTitle}</a></li>\n`;
     }
 
-    // 5. Create content.opf
+    // 6. Generate nav.xhtml (EPUB 3 Mandatory)
+    const navContent = `<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="${isChinese ? 'zh' : 'en'}">
+<head>
+  <title>${isChinese ? '目录' : 'Table of Contents'}</title>
+  <link rel="stylesheet" href="css/styles.css" type="text/css"/>
+</head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <h1>${isChinese ? '目录' : 'Table of Contents'}</h1>
+    <ol>
+      ${navList}
+    </ol>
+  </nav>
+</body>
+</html>`;
+    
+    zip.file("nav.xhtml", navContent);
+
+    // 7. Create content.opf
+    const safeBookTitle = escapeXml(title);
+    const uuid = `urn:uuid:${crypto.randomUUID()}`;
+    const date = new Date().toISOString().split('T')[0];
+    
+    // Add Cover Meta if available
+    const coverMeta = generatedCoverId ? `<meta name="cover" content="${generatedCoverId}" />` : '';
+
+    // Add nav.xhtml to manifest
+    manifestItems += `<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>\n`;
+
     const opfContent = `<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="2.0">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:title>${title} (Translated)</dc:title>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/">
+    <dc:title>${safeBookTitle} (Translated)</dc:title>
     <dc:language>${isChinese ? 'zh' : 'en'}</dc:language>
-    <dc:identifier id="uuid_id" opf:scheme="uuid">${crypto.randomUUID()}</dc:identifier>
+    <dc:identifier id="uuid_id">${uuid}</dc:identifier>
+    <dc:date>${date}</dc:date>
+    <meta property="dcterms:modified">${new Date().toISOString().replace(/\.\d+Z$/, 'Z')}</meta>
+    ${coverMeta}
   </metadata>
   <manifest>
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
@@ -355,16 +506,16 @@ ${htmlBody}
 
     zip.file("content.opf", opfContent);
 
-    // 6. Create toc.ncx
+    // 8. Create toc.ncx (EPUB 2 Backward Compatibility)
     const ncxContent = `<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
-    <meta name="dtb:uid" content="urn:uuid:12345"/>
+    <meta name="dtb:uid" content="${uuid}"/>
     <meta name="dtb:depth" content="1"/>
     <meta name="dtb:totalPageCount" content="0"/>
     <meta name="dtb:maxPageNumber" content="0"/>
   </head>
-  <docTitle><text>${title}</text></docTitle>
+  <docTitle><text>${safeBookTitle}</text></docTitle>
   <navMap>
     ${navPoints}
   </navMap>
@@ -372,7 +523,7 @@ ${htmlBody}
     
     zip.file("toc.ncx", ncxContent);
 
-    // 7. Generate Blob
+    // 9. Generate Blob
     return await zip.generateAsync({ type: "blob" });
   }
 }
