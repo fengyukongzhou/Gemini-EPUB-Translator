@@ -7,38 +7,97 @@ import { EpubService } from './services/epubService';
 import { AiService } from './services/geminiService';
 import { AppStatus, AppConfig, Chapter, ProcessingLog } from './types';
 
-// Constants for Recommended Prompts
-const RECOMMENDED_TRANSLATION_PROMPT = `You are a professional literary translator.
-Your task is to translate the provided text into the target language while preserving the original tone, style, and formatting.
+// Constants for Recommended Prompts (Chinese Optimized)
+const RECOMMENDED_TRANSLATION_CORE = `英文进入此场即死。
 
-Guidelines:
-1. Translate the content accurately.
-2. Maintain the markdown structure (headers, bold, italics).
-3. Do not output any explanations or conversational text, only the translated content.
-4. Keep proper nouns and specific terms consistent.`;
+中文从其养分中生。
 
-const RECOMMENDED_PROOFREAD_PROMPT = `You are a professional proofreader.
-Your task is to review the text for grammar, flow, and translation errors.
+场之根本律：
 
-Guidelines:
-1. Fix any grammatical errors or awkward phrasings.
-2. Ensure the tone is consistent.
-3. Do not change the meaning of the text.
-4. Return only the corrected markdown text.`;
+【遗忘之律】
+
+忘记英文的句法。
+
+忘记英文的语序。 
+
+只记住它要说的事。
+
+【重生之律】
+
+如果你是中国作者，
+
+面对中国读者，
+
+你会怎么讲这个故事？
+
+【地道之律】
+
+"类似的剧情在计算机围棋领域也重演了一遍，只不过晚了20年。"
+
+而非"相似的情节在计算机围棋领域被重复了，延迟了20年。"
+
+中文有自己的韵律：
+
+- 四字短语的节奏感
+
+- 口语的亲切感
+
+- 成语俗语的画面感
+
+场的检验标准：
+
+读完后，读者会说"写得真好"
+
+而不是"翻译得真好"。
+
+真实之锚：
+
+- 数据一字不改
+
+- 事实纹丝不动
+
+- 逻辑完整移植
+
+- 术语规范标注：大语言模型（LLM）
+
+注意事项：
+
+- 输入 Epub 格式文本，返回标准 Markdown 格式文本
+
+- 小说角色名保持为原文，不需要翻译
+
+- 默认使用简体中文`;
+
+const MANDATORY_OUTPUT_RULES = `
+=== 严格输出格式规则 ===
+1. 仅输出翻译后的正文内容，格式必须为标准的 Markdown。
+2. 严禁输出任何思考过程、<think> 标签或推理逻辑。
+3. 严禁输出任何对话式填充语（如“好的，这是翻译”、“以下是译文”等）。
+4. 严禁使用 Markdown 代码块包裹输出（即不要使用 \`\`\`markdown）。请直接返回原始内容。
+5. 必须严格保留原文的 Markdown 结构（标题、粗体、斜体等）。`;
+
+const RECOMMENDED_PROOFREAD_PROMPT = `你是一位资深的文学编辑和校对专家。
+你的任务是润色和校对提供的中文译文，使其更加通顺、地道且符合文学标准。
+
+校对指南：
+1. 修正语法错误、错别字和标点符号错误。
+2. 优化句子结构，使其更加符合中文阅读习惯，消除翻译腔。
+3. 在不改变原文原意的前提下，提升文字的文学性和感染力。
+4. 检查并修复可能存在的格式错误。
+5. 仅返回修正后的 Markdown 文本，不要添加任何额外说明。`;
 
 // Default config values
 const DEFAULT_CONFIG: AppConfig = {
   targetLanguage: 'Chinese (Simplified)',
-  systemInstruction: `You are an expert literary translator. Your task is to rewrite the original text into the target language.
+  systemInstruction: `你是一位专家级的文学翻译。你的任务是将原文重写为目标语言。
 
-Guidelines:
-1. Input: Text derived from an EPUB file.
-2. Output: Standard Markdown format.
-3. Character Names: Keep novel character names in their original language. Do NOT translate them.
-4. Fidelity: Maintain the original tone, style, and logic of the story.`,
-  proofreadInstruction: 'Check for mixed languages (e.g., untranslated sentences) and fix them. Ensure smooth flow. Return the corrected markdown only.',
+指南：
+1. 输入：源自 EPUB 文件的文本。
+2. 角色名称：保留小说角色名称的原文，不要翻译。
+3. 忠实度：保持故事原本的语调、风格和逻辑。`,
+  proofreadInstruction: '检查混合语言（例如未翻译的句子）并修复它们。确保流畅。仅返回修正后的 markdown。',
   enableProofreading: true,
-  useRecommendedPrompts: false,
+  useRecommendedPrompts: true, // Default to true for better out-of-box experience
   smartSkip: true
 };
 
@@ -127,9 +186,12 @@ const App: React.FC = () => {
       const totalSteps = chapters.length * (config.enableProofreading ? 2 : 1);
       
       // Select prompts based on configuration
-      const effectiveSystemInstruction = config.useRecommendedPrompts 
-        ? RECOMMENDED_TRANSLATION_PROMPT 
+      const baseInstruction = config.useRecommendedPrompts 
+        ? RECOMMENDED_TRANSLATION_CORE 
         : config.systemInstruction;
+      
+      // Enforce strict output format rules by appending them to the core instruction
+      const effectiveSystemInstruction = `${baseInstruction}\n\n${MANDATORY_OUTPUT_RULES}`;
         
       const effectiveProofreadInstruction = config.useRecommendedPrompts
         ? RECOMMENDED_PROOFREAD_PROMPT
@@ -138,7 +200,7 @@ const App: React.FC = () => {
       addLog(`🚀 Starting translation using Google Gemini 3.0 Flash...`, "info");
 
       if (config.useRecommendedPrompts) {
-        addLog("✨ Using Recommended Prompts.", "info");
+        addLog("✨ Using Recommended Prompts (Chinese Optimized).", "info");
       }
       
       if (config.smartSkip) {
@@ -264,7 +326,7 @@ const App: React.FC = () => {
           </div>
           <div>
             <h1 className="text-xl font-bold text-slate-900">Gemini EPUB Translator</h1>
-            <p className="text-xs text-slate-500">Automated Translation Workflow</p>
+            <p className="text-xs text-slate-500">Automated Workflow (Gemini 3.0 Flash)</p>
           </div>
         </div>
         {status === AppStatus.COMPLETED && downloadUrl && (
